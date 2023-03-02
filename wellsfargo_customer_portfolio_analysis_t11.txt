@@ -1,0 +1,94 @@
+/*
+Date: 2022-12-15
+Team 11 - Business Challenge #1 - BCH-7810 - BMBAND1
+Authors: Alessia Monfardino, Dalton Everett, Megan Bierfert, Jun Kuwasaki, Santiago Crane, Ximena Hamon
+General comments: 
+Random customer sampling and client information substraction - Megan
+Calling variables for delta calculations (returns) - Dalton
+View creation, with statement and code formating - Ximena
+Returns by periods 12m,18m,24m & stddv, weigthed totals - Jun
+Queries joining - Alessia
+Result table construction - Santiago
+*/
+
+USE invest;
+
+-- Remove dashes to drop the view if there is one already created on the cloud server to be able to run the whole code
+-- DROP VIEW IF EXISTS invest.main_table_team_11;
+
+CREATE VIEW main_table_team_11 AS
+-- we settle the with statement enclosing it in the view statemnt to be able to handle the data when bringing customers info so we don't lose any field in the process
+-- whith statements will help us to create a temporary result for the Po calulcation, to be able to refer later in the security returns calclulation, (P1-Po)/Po
+-- For the return periods 12M, 18M and 24M
+WITH pr AS(
+		SELECT  ticker, date, value,
+				LAG(value, 250) OVER(PARTITION BY ticker ORDER BY date) AS lagged_price_12m,
+				LAG(value, 375) OVER(PARTITION BY ticker ORDER BY date) AS lagged_price_18m,
+				LAG(value, 500) OVER(PARTITION BY ticker ORDER BY date) AS lagged_price_24m
+		FROM pricing_daily_new
+        WHERE price_type = 'Adjusted'
+-- dates were selected to visualize the securites behaviour for the past 3 years, considering the data previos that time range is not relevant
+			AND YEAR(date) IN (2022,2021,2020)
+)
+
+SELECT  pr.ticker, pr.date, pr.value,
+-- values for average and standard deviations are taken from the first LEFT JOIN called dst
+-- using the temporary result from with statement (pr) we start calling the Po(lagged prices)
+		ROUND(pr.lagged_price_12m,2) AS lagged_price_12m, 
+-- returns calculation
+        ROUND(((pr.value - pr.lagged_price_12m)/pr.lagged_price_12m),4) AS returns_12m,
+-- averge retuns by security, mean
+-- sigma calculation, standard deviation how far each data point is far from the mean, initial risk calculation step
+        ROUND(dst.avg_12m,2) AS avg_12m , ROUND(dst.stddv_12m,2) AS stddv_12m, 
+-- risk adjusted returns, sharp ratio
+        ROUND(dst.risk_adj_returns_12m,2) AS risk_adj_returns_12m,
+-- the procedure described previously will run for each period
+        ROUND(pr.lagged_price_18m,2) AS lagged_price_18m, 
+        ROUND(((pr.value - pr.lagged_price_18m)/pr.lagged_price_18m),4) AS returns_18m,
+        ROUND(dst.avg_18m,2) AS avg_18m , ROUND(dst.stddv_18m,2) AS stddv_18m, 
+        ROUND(dst.risk_adj_returns_18m,2) AS risk_adj_returns_18m,
+        ROUND(pr.lagged_price_24m,2) AS lagged_price_24m, 
+        ROUND(((pr.value - pr.lagged_price_24m)/pr.lagged_price_24m),4) AS returns_24m,
+        ROUND(dst.avg_24m,2) AS avg_24m , ROUND(dst.stddv_24m,2) AS stddv_24m, 
+        ROUND(dst.risk_adj_returns_24m,2) AS risk_adj_returns_24m
+
+FROM pr
+-- statistcal values calculation
+-- most recent values for each time range
+LEFT JOIN(
+		SELECT  ticker,
+				STD(lagged_price_12m) AS stddv_12m,
+				STD(lagged_price_18m) AS stddv_18m,
+				STD(lagged_price_24m) AS stddv_24m,
+				AVG(lagged_price_12m) AS avg_12m,
+				AVG(lagged_price_18m) AS avg_18m,
+				AVG(lagged_price_24m) AS avg_24m,
+				AVG(lagged_price_12m)/STD(lagged_price_12m) AS risk_adj_returns_12m,
+				AVG(lagged_price_18m)/STD(lagged_price_18m) AS risk_adj_returns_18m,
+				AVG(lagged_price_24m)/STD(lagged_price_24m) AS risk_adj_returns_24m
+FROM pr 
+GROUP BY ticker) AS dst ON pr.ticker = dst.ticker
+-- the most recent piece of data was taken on the date selected bellow, compared to the historical data in the past years
+WHERE pr.date = '2022-09-09'
+;
+
+-- this piece of code will bring all the information needed to analyze the customer's portfolio
+SELECT  cd.full_name, hc.account_id, hc.ticker, sm.security_name, sm.major_asset_class, hc.quantity AS quantity_of_sec, hc.value,
+		ROUND((hc.value * hc.quantity),2) AS sub_total,
+        SUM(ROUND((hc.value * hc.quantity),2)) OVER(PARTITION BY account_id) AS total_value,
+        ROUND(((hc.value * hc.quantity))/(SUM((hc.value * hc.quantity)) OVER(PARTITION BY account_id)),4) AS weighted_total,
+        mtt.lagged_price_12m, mtt.returns_12m, mtt.avg_12m, mtt.stddv_12m, mtt.risk_adj_returns_12m,
+        mtt.lagged_price_18m, mtt.returns_18m, mtt.avg_18m, mtt.stddv_18m, mtt.risk_adj_returns_18m,
+        mtt.lagged_price_24m, mtt.returns_24m, mtt.avg_24m, mtt.stddv_24m, mtt.risk_adj_returns_24m
+FROM 	invest.holdings_current AS hc
+-- capturing customer information
+INNER JOIN account_dim AS ad ON ad.account_id = hc.account_id
+INNER JOIN customer_details AS cd ON cd.customer_id = ad.client_id
+INNER JOIN security_masterlist AS sm ON sm.ticker = hc.ticker
+-- joining customer portfolio with statistical values to have a full view of customer's portfolio behavior
+-- customers tada with view 
+LEFT JOIN (
+			SELECT *
+            FROM invest.main_table_team_11) AS mtt ON mtt.ticker = hc.ticker
+;
+
